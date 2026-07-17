@@ -1,0 +1,72 @@
+name: Generate west manifest
+
+on:
+  pull_request_target:
+    types: [closed]
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    outputs:
+      module_count: ${{ steps.generate.outputs.module_count }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Test manifest generator
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Generate west.yml
+        id: generate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          manifest_path="$(mktemp)"
+          python3 scripts/generate_west_manifest.py \
+            --readme README.md \
+            --output "$manifest_path"
+          count="$(grep -c '^    - name:' "$manifest_path" || true)"
+          echo "module_count=${count}" >> "$GITHUB_OUTPUT"
+          echo "manifest_path=${manifest_path}" >> "$GITHUB_OUTPUT"
+
+      - name: Show generated manifest
+        run: cat "${{ steps.generate.outputs.manifest_path }}"
+
+      - name: Commit west.yml to extmod-repos
+        env:
+          MANIFEST_PATH: ${{ steps.generate.outputs.manifest_path }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --exit-code --heads origin \
+              extmod-repos >/dev/null 2>&1; then
+            git fetch origin extmod-repos
+            git switch --create extmod-repos --track origin/extmod-repos
+          else
+            git switch --orphan extmod-repos
+          fi
+
+          # Keep this branch as a generated-file-only branch.
+          git rm -rf . || true
+          cp "$MANIFEST_PATH" west.yml
+          git add -- west.yml
+          test "$(git ls-files)" = "west.yml"
+
+          if git diff --cached --quiet; then
+            echo "west.yml is unchanged."
+            exit 0
+          fi
+
+          git commit -m "Update external Zephyr modules"
+          git push origin HEAD:extmod-repos
