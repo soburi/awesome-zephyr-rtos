@@ -53,6 +53,7 @@
 - [Sense-VM](https://github.com/svenssonjoel/Sense-VM) - Bytecode virtual machine for microcontrollers.
 - [Swedish Embedded Platform SDK](https://github.com/swedishembedded/sdk) - Swedish Embedded Platform SDK is a comprehensive platform for firmware development.
 - [zpp](https://github.com/lowlander/zpp) - C++20 framework.
+- [u8g2](https://github.com/soburi/u8g2) - u8g2 graphics library
 
 ### Filesystem
 
