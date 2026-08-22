@@ -39,27 +39,20 @@ jobs:
       - name: Show generated manifest
         run: cat "${{ steps.generate.outputs.manifest_path }}"
 
-      - name: Commit external-modules.yml to extmod-repos
+      - name: Commit external-modules.yml to the merged branch
         env:
           MANIFEST_PATH: ${{ steps.generate.outputs.manifest_path }}
+          TARGET_BRANCH: ${{ github.event.pull_request.base.ref }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email \
             "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if git ls-remote --exit-code --heads origin \
-              extmod-repos >/dev/null 2>&1; then
-            git fetch origin extmod-repos
-            git switch --create extmod-repos --track origin/extmod-repos
-          else
-            git switch --orphan extmod-repos
-          fi
-
-          # Keep this branch as a generated-file-only branch.
-          git rm -rf . || true
+          git fetch origin "$TARGET_BRANCH"
+          git switch --force-create "$TARGET_BRANCH" \
+            "origin/$TARGET_BRANCH"
           cp "$MANIFEST_PATH" external-modules.yml
           git add -- external-modules.yml
-          test "$(git ls-files)" = "external-modules.yml"
 
           if git diff --cached --quiet; then
             echo "external-modules.yml is unchanged."
@@ -67,4 +60,4 @@ jobs:
           fi
 
           git commit -m "Update external Zephyr modules"
-          git push origin HEAD:extmod-repos
+          git push origin "HEAD:$TARGET_BRANCH"
