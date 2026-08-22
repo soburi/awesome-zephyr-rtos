@@ -1,4 +1,5 @@
 import json
+import base64
 import tempfile
 import textwrap
 import unittest
@@ -27,6 +28,24 @@ class FakeResponse:
 
 
 class GenerateWestManifestTest(unittest.TestCase):
+    def test_load_west_manifest_from_github_api_content(self):
+        manifest = "manifest:\n  projects:\n    - name: existing\n      url: https://github.com/example/existing\n"
+        client = generator.ApiClient("token")
+        with patch.object(
+            client,
+            "get_json",
+            return_value={
+                "encoding": "base64",
+                "content": base64.b64encode(manifest.encode()).decode(),
+            },
+        ):
+            self.assertEqual(
+                client.load_west_manifest_exclusions(
+                    generator.DEFAULT_ZEPHYR_MANIFEST_URL
+                ),
+                ({("github.com", "example/existing")}, {"existing"}),
+            )
+
     def test_parse_west_manifest_repositories_supports_remote_and_url(self):
         manifest = textwrap.dedent(
             """
@@ -57,11 +76,16 @@ class GenerateWestManifestTest(unittest.TestCase):
                 ("github.com", "zephyrproject-rtos/custom-repo"),
             },
         )
+        self.assertEqual(
+            generator.parse_west_manifest_project_names(manifest),
+            {"cmsis", "direct", "renamed"},
+        )
 
     def test_find_modules_excludes_west_manifest_projects(self):
         markdown = """
         [existing](https://github.com/example/existing)
         [external](https://github.com/example/external)
+        [zcbor](https://github.com/NordicSemiconductor/zcbor)
         """
 
         class FakeClient:
@@ -75,11 +99,26 @@ class GenerateWestManifestTest(unittest.TestCase):
         modules = generator.find_modules(
             markdown,
             FakeClient(),
-            {("github.com", "example/existing")},
+            set(),
+            {"existing", "zcbor"},
         )
         self.assertEqual(
             modules,
             [generator.Module("external", "https://github.com/example/external", "main")],
+        )
+
+    def test_linked_repository_keys_normalizes_supported_links(self):
+        markdown = """
+        [one](https://github.com/example/one/tree/main/docs)
+        [same](https://github.com/example/one)
+        [two](https://gitlab.com/group/subgroup/two)
+        """
+        self.assertEqual(
+            generator.linked_repository_keys(markdown),
+            {
+                ("github.com", "example/one"),
+                ("gitlab.com", "group/subgroup/two"),
+            },
         )
 
     def test_extract_and_normalize_links(self):
@@ -172,8 +211,8 @@ class GenerateWestManifestTest(unittest.TestCase):
 
             with patch.object(
                 generator.ApiClient,
-                "load_west_manifest_repositories",
-                return_value=set(),
+                "load_west_manifest_exclusions",
+                return_value=(set(), set()),
             ), patch.object(
                 sys,
                 "argv",

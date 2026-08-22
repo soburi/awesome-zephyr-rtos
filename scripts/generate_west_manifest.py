@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -21,7 +22,8 @@ LINK_RE = re.compile(
 )
 USER_AGENT = "awesome-zephyr-rtos-west-manifest"
 DEFAULT_ZEPHYR_MANIFEST_URL = (
-    "https://raw.githubusercontent.com/zephyrproject-rtos/zephyr/main/west.yml"
+    "https://api.github.com/repos/zephyrproject-rtos/zephyr/contents/west.yml"
+    "?ref=main"
 )
 
 
@@ -138,8 +140,37 @@ class ApiClient:
         except (urllib.error.URLError, TimeoutError, UnicodeDecodeError) as error:
             raise RemoteCheckError(f"Could not read manifest {url}: {error}") from error
 
-    def load_west_manifest_repositories(self, url: str) -> set[tuple[str, str]]:
-        return parse_west_manifest_repositories(self.get_text(url))
+    def load_west_manifest_exclusions(
+        self, url: str
+    ) -> tuple[set[tuple[str, str]], set[str]]:
+        if url.startswith("https://api.github.com/"):
+            payload = self.get_json(url, service="github")
+            if not isinstance(payload, dict):
+                raise RemoteCheckError(
+                    f"GitHub API returned no west manifest content: {url}"
+                )
+            content = payload.get("content")
+            encoding = payload.get("encoding")
+            if not isinstance(content, str) or encoding != "base64":
+                raise RemoteCheckError(
+                    f"GitHub API returned an unsupported west manifest response: {url}"
+                )
+            try:
+                manifest = base64.b64decode(content).decode("utf-8")
+            except (ValueError, UnicodeDecodeError) as error:
+                raise RemoteCheckError(
+                    f"Could not decode the west manifest returned by {url}: {error}"
+                ) from error
+        else:
+            manifest = self.get_text(url)
+
+        repositories = parse_west_manifest_repositories(manifest)
+        project_names = parse_west_manifest_project_names(manifest)
+        if not repositories:
+            raise RemoteCheckError(
+                f"No projects were found in the west manifest: {url}"
+            )
+        return repositories, project_names
 
     def find_module(self, repository: Repository) -> Module | None:
         if repository.host == "github.com":
@@ -290,6 +321,26 @@ def parse_west_manifest_repositories(manifest: str) -> set[tuple[str, str]]:
     return repositories
 
 
+def parse_west_manifest_project_names(manifest: str) -> set[str]:
+    """Extract project names from the projects section of a west manifest."""
+
+    names: set[str] = set()
+    in_projects = False
+    for raw_line in manifest.splitlines():
+        line = raw_line.rstrip()
+        if re.match(r"^\s{2}projects:\s*$", line):
+            in_projects = True
+            continue
+        if in_projects and re.match(r"^\s{2}\w[\w-]*:\s*$", line):
+            if not re.match(r"^\s{2}projects:\s*$", line):
+                break
+        if in_projects:
+            match = re.match(r"^\s{4}-\s+name:\s*(.+?)\s*$", line)
+            if match:
+                names.add(parse_yaml_scalar(match.group(1)).lower())
+    return names
+
+
 def parse_yaml_scalar(value: str) -> str:
     """Parse the quoted scalar forms used for west manifest fields."""
 
@@ -308,6 +359,7 @@ def find_modules(
     markdown: str,
     client: ApiClient,
     excluded_repositories: set[tuple[str, str]] | None = None,
+    excluded_project_names: set[str] | None = None,
 ) -> list[Module]:
     """Check linked repositories, excluding entries in another manifest."""
 
@@ -315,10 +367,16 @@ def find_modules(
     seen: set[tuple[str, str]] = set()
     for link in extract_links(markdown):
         repository = normalize_repository(link)
+        repository_name = (
+            repository.path.rsplit("/", 1)[-1].lower()
+            if repository is not None
+            else None
+        )
         if (
             repository is None
             or repository.key in seen
             or repository.key in (excluded_repositories or set())
+            or repository_name in (excluded_project_names or set())
         ):
             continue
         repositories.append(repository)
@@ -340,6 +398,39 @@ def find_modules(
         used_names.add(name.lower())
         modules.append(module)
     return modules
+
+
+def linked_repository_keys(markdown: str) -> set[tuple[str, str]]:
+    """Return normalized repository keys linked from Markdown."""
+
+    repositories: set[tuple[str, str]] = set()
+    for link in extract_links(markdown):
+        repository = normalize_repository(link)
+        if repository is not None:
+            repositories.add(repository.key)
+    return repositories
+
+
+def count_excluded_links(
+    markdown: str,
+    excluded_repositories: set[tuple[str, str]],
+    excluded_project_names: set[str],
+) -> int:
+    """Count unique README repositories excluded by the official manifest."""
+
+    count = 0
+    seen: set[tuple[str, str]] = set()
+    for link in extract_links(markdown):
+        repository = normalize_repository(link)
+        if repository is None or repository.key in seen:
+            continue
+        seen.add(repository.key)
+        if (
+            repository.key in excluded_repositories
+            or repository.path.rsplit("/", 1)[-1].lower() in excluded_project_names
+        ):
+            count += 1
+    return count
 
 
 def yaml_string(value: str) -> str:
@@ -400,10 +491,19 @@ def main() -> int:
     try:
         markdown = args.readme.read_text(encoding="utf-8")
         client = ApiClient(args.github_token)
-        excluded_repositories = client.load_west_manifest_repositories(
+        excluded_repositories, excluded_project_names = client.load_west_manifest_exclusions(
             args.zephyr_manifest_url
         )
-        modules = find_modules(markdown, client, excluded_repositories)
+        excluded_linked_repositories = count_excluded_links(
+            markdown, excluded_repositories, excluded_project_names
+        )
+        print(
+            f"Loaded {len(excluded_repositories)} Zephyr west projects; "
+            f"excluding {excluded_linked_repositories} linked repository(ies)."
+        )
+        modules = find_modules(
+            markdown, client, excluded_repositories, excluded_project_names
+        )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(render_west_manifest(modules), encoding="utf-8")
     except (OSError, RemoteCheckError) as error:
