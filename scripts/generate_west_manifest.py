@@ -373,10 +373,15 @@ def render_west_manifest(modules: Iterable[Module]) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Find Zephyr modules linked in a Markdown file and emit west.yml."
+        description=(
+            "Find Zephyr modules linked in a Markdown file and emit "
+            "external-modules.yml."
+        )
     )
     parser.add_argument("--readme", type=Path, default=Path("README.md"))
-    parser.add_argument("--output", type=Path, default=Path("west.yml"))
+    parser.add_argument(
+        "--output", type=Path, default=Path("external-modules.yml")
+    )
     parser.add_argument(
         "--github-token",
         default=os.environ.get("GITHUB_TOKEN"),

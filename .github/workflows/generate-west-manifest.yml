@@ -1,10 +1,8 @@
-name: Generate west manifest
+name: Generate external module list
 
 on:
   pull_request_target:
     types: [closed]
-    branches:
-      - main
 
 permissions:
   contents: write
@@ -19,13 +17,13 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ github.event.pull_request.base.ref }}
           fetch-depth: 0
 
       - name: Test manifest generator
         run: python3 -m unittest -v tests/test_generate_west_manifest.py
 
-      - name: Generate west.yml
+      - name: Generate external-modules.yml
         id: generate
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -41,7 +39,7 @@ jobs:
       - name: Show generated manifest
         run: cat "${{ steps.generate.outputs.manifest_path }}"
 
-      - name: Commit west.yml to extmod-repos
+      - name: Commit external-modules.yml to extmod-repos
         env:
           MANIFEST_PATH: ${{ steps.generate.outputs.manifest_path }}
         run: |
@@ -59,12 +57,12 @@ jobs:
 
           # Keep this branch as a generated-file-only branch.
           git rm -rf . || true
-          cp "$MANIFEST_PATH" west.yml
-          git add -- west.yml
-          test "$(git ls-files)" = "west.yml"
+          cp "$MANIFEST_PATH" external-modules.yml
+          git add -- external-modules.yml
+          test "$(git ls-files)" = "external-modules.yml"
 
           if git diff --cached --quiet; then
-            echo "west.yml is unchanged."
+            echo "external-modules.yml is unchanged."
             exit 0
           fi
 

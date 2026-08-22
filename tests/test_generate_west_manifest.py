@@ -167,7 +167,7 @@ class GenerateWestManifestTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             readme = root / "README.md"
-            output = root / "nested" / "west.yml"
+            output = root / "nested" / "external-modules.yml"
             readme.write_text("[site](https://example.com)", encoding="utf-8")
 
             with patch.object(
