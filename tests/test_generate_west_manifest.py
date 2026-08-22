@@ -1,5 +1,6 @@
 import json
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -26,6 +27,61 @@ class FakeResponse:
 
 
 class GenerateWestManifestTest(unittest.TestCase):
+    def test_parse_west_manifest_repositories_supports_remote_and_url(self):
+        manifest = textwrap.dedent(
+            """
+        manifest:
+          defaults:
+            remote: upstream
+          remotes:
+            - name: upstream
+              url-base: https://github.com/zephyrproject-rtos
+          projects:
+            - name: cmsis
+              revision: abc
+            - name: direct
+              url: https://github.com/example/direct
+              revision: main
+            - name: renamed
+              remote: upstream
+              repo-path: custom-repo
+              revision: main
+            """
+        )
+
+        self.assertEqual(
+            generator.parse_west_manifest_repositories(manifest),
+            {
+                ("github.com", "zephyrproject-rtos/cmsis"),
+                ("github.com", "example/direct"),
+                ("github.com", "zephyrproject-rtos/custom-repo"),
+            },
+        )
+
+    def test_find_modules_excludes_west_manifest_projects(self):
+        markdown = """
+        [existing](https://github.com/example/existing)
+        [external](https://github.com/example/external)
+        """
+
+        class FakeClient:
+            def find_module(self, repository):
+                return generator.Module(
+                    repository.path.rsplit("/", 1)[-1],
+                    repository.url,
+                    "main",
+                )
+
+        modules = generator.find_modules(
+            markdown,
+            FakeClient(),
+            {("github.com", "example/existing")},
+        )
+        self.assertEqual(
+            modules,
+            [generator.Module("external", "https://github.com/example/external", "main")],
+        )
+
     def test_extract_and_normalize_links(self):
         markdown = """
         [module](https://github.com/example/module)
@@ -115,6 +171,10 @@ class GenerateWestManifestTest(unittest.TestCase):
             readme.write_text("[site](https://example.com)", encoding="utf-8")
 
             with patch.object(
+                generator.ApiClient,
+                "load_west_manifest_repositories",
+                return_value=set(),
+            ), patch.object(
                 sys,
                 "argv",
                 ["generate_west_manifest.py", "--readme", str(readme), "--output", str(output)],

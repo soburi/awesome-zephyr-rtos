@@ -20,6 +20,9 @@ LINK_RE = re.compile(
     r"(?<!!)\[[^\]]+\]\(\s*(?:<(?P<bracket>[^>]+)>|(?P<plain>[^)\s]+))"
 )
 USER_AGENT = "awesome-zephyr-rtos-west-manifest"
+DEFAULT_ZEPHYR_MANIFEST_URL = (
+    "https://raw.githubusercontent.com/zephyrproject-rtos/zephyr/main/west.yml"
+)
 
 
 class RemoteCheckError(RuntimeError):
@@ -121,6 +124,23 @@ class ApiClient:
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
             raise RemoteCheckError(f"Could not check {url}: {error}") from error
 
+    def get_text(self, url: str) -> str:
+        request = urllib.request.Request(
+            url, headers={"Accept": "text/plain", "User-Agent": USER_AGENT}
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return response.read().decode("utf-8")
+        except urllib.error.HTTPError as error:
+            raise RemoteCheckError(
+                f"Manifest URL returned HTTP {error.code}: {url}"
+            ) from error
+        except (urllib.error.URLError, TimeoutError, UnicodeDecodeError) as error:
+            raise RemoteCheckError(f"Could not read manifest {url}: {error}") from error
+
+    def load_west_manifest_repositories(self, url: str) -> set[tuple[str, str]]:
+        return parse_west_manifest_repositories(self.get_text(url))
+
     def find_module(self, repository: Repository) -> Module | None:
         if repository.host == "github.com":
             return self._find_github_module(repository)
@@ -181,14 +201,125 @@ class ApiClient:
         return Module(name=name, url=repository.url, revision=revision)
 
 
-def find_modules(markdown: str, client: ApiClient) -> list[Module]:
-    """Check supported repositories linked in Markdown, preserving link order."""
+def parse_west_manifest_repositories(manifest: str) -> set[tuple[str, str]]:
+    """Extract repository keys from a west manifest.
+
+    This intentionally parses only the west manifest fields needed for
+    comparison. It supports both direct project ``url`` entries and the
+    usual ``remote``/``url-base`` form used by Zephyr's manifest.
+    """
+
+    remotes: dict[str, str] = {}
+    projects: list[dict[str, str]] = []
+    defaults_remote: str | None = None
+    section: str | None = None
+    current: dict[str, str] | None = None
+    in_defaults = False
+
+    def finish_project() -> None:
+        if section == "projects" and current is not None:
+            projects.append(current.copy())
+
+    for raw_line in manifest.splitlines():
+        line = raw_line.rstrip()
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+
+        if re.match(r"^\s{2}remotes:\s*$", line):
+            finish_project()
+            current = None
+            section = "remotes"
+            in_defaults = False
+            continue
+        if re.match(r"^\s{2}projects:\s*$", line):
+            finish_project()
+            current = None
+            section = "projects"
+            in_defaults = False
+            continue
+        if re.match(r"^\s{2}defaults:\s*$", line):
+            finish_project()
+            current = None
+            section = None
+            in_defaults = True
+            continue
+
+        if in_defaults:
+            match = re.match(r"^\s{4}remote:\s*(.+?)\s*$", line)
+            if match:
+                defaults_remote = parse_yaml_scalar(match.group(1))
+            continue
+
+        if section == "remotes":
+            match = re.match(r"^\s{4}-\s+name:\s*(.+?)\s*$", line)
+            if match:
+                current = {"name": parse_yaml_scalar(match.group(1))}
+                remotes[current["name"]] = ""
+                continue
+            match = re.match(r"^\s{6}url-base:\s*(.+?)\s*$", line)
+            if match and current is not None:
+                remotes[current["name"]] = parse_yaml_scalar(match.group(1))
+            continue
+
+        if section == "projects":
+            match = re.match(r"^\s{4}-\s+name:\s*(.+?)\s*$", line)
+            if match:
+                finish_project()
+                current = {"name": parse_yaml_scalar(match.group(1))}
+                continue
+            match = re.match(
+                r"^\s{6}(remote|repo-path|url):\s*(.+?)\s*$", line
+            )
+            if match and current is not None:
+                current[match.group(1)] = parse_yaml_scalar(match.group(2))
+
+    finish_project()
+
+    repositories: set[tuple[str, str]] = set()
+    for project in projects:
+        project_url = project.get("url")
+        if project_url is None:
+            remote_name = project.get("remote", defaults_remote)
+            url_base = remotes.get(remote_name or "")
+            if not url_base:
+                continue
+            project_url = f"{url_base.rstrip('/')}/{project.get('repo-path', project['name'])}"
+        repository = normalize_repository(project_url)
+        if repository is not None:
+            repositories.add(repository.key)
+    return repositories
+
+
+def parse_yaml_scalar(value: str) -> str:
+    """Parse the quoted scalar forms used for west manifest fields."""
+
+    value = value.strip()
+    if len(value) >= 2 and value[0] == "'" and value[-1] == "'":
+        return value[1:-1].replace("''", "'")
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            pass
+    return value.split(" #", 1)[0].rstrip()
+
+
+def find_modules(
+    markdown: str,
+    client: ApiClient,
+    excluded_repositories: set[tuple[str, str]] | None = None,
+) -> list[Module]:
+    """Check linked repositories, excluding entries in another manifest."""
 
     repositories: list[Repository] = []
     seen: set[tuple[str, str]] = set()
     for link in extract_links(markdown):
         repository = normalize_repository(link)
-        if repository is None or repository.key in seen:
+        if (
+            repository is None
+            or repository.key in seen
+            or repository.key in (excluded_repositories or set())
+        ):
             continue
         repositories.append(repository)
         seen.add(repository.key)
@@ -251,6 +382,11 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("GITHUB_TOKEN"),
         help="GitHub API token; defaults to GITHUB_TOKEN.",
     )
+    parser.add_argument(
+        "--zephyr-manifest-url",
+        default=DEFAULT_ZEPHYR_MANIFEST_URL,
+        help="Official west manifest used to exclude existing Zephyr projects.",
+    )
     return parser.parse_args()
 
 
@@ -258,7 +394,11 @@ def main() -> int:
     args = parse_args()
     try:
         markdown = args.readme.read_text(encoding="utf-8")
-        modules = find_modules(markdown, ApiClient(args.github_token))
+        client = ApiClient(args.github_token)
+        excluded_repositories = client.load_west_manifest_repositories(
+            args.zephyr_manifest_url
+        )
+        modules = find_modules(markdown, client, excluded_repositories)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(render_west_manifest(modules), encoding="utf-8")
     except (OSError, RemoteCheckError) as error:
