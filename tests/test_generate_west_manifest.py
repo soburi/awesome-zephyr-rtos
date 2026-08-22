@@ -31,19 +31,78 @@ class GenerateWestManifestTest(unittest.TestCase):
     def test_load_west_manifest_from_github_api_content(self):
         manifest = "manifest:\n  projects:\n    - name: existing\n      url: https://github.com/example/existing\n"
         client = generator.ApiClient("token")
+
+        def fake_get_json(url, *, service):
+            if url == generator.DEFAULT_ZEPHYR_MANIFEST_URL:
+                return {
+                    "encoding": "base64",
+                    "content": base64.b64encode(manifest.encode()).decode(),
+                }
+            if url == generator.DEFAULT_ZEPHYR_SUBMANIFESTS_URL:
+                return []
+            raise AssertionError(f"unexpected URL: {url}")
+
         with patch.object(
             client,
             "get_json",
-            return_value={
-                "encoding": "base64",
-                "content": base64.b64encode(manifest.encode()).decode(),
-            },
+            side_effect=fake_get_json,
         ):
             self.assertEqual(
                 client.load_west_manifest_exclusions(
                     generator.DEFAULT_ZEPHYR_MANIFEST_URL
                 ),
                 ({("github.com", "example/existing")}, {"existing"}),
+            )
+
+    def test_load_west_manifest_includes_submanifests(self):
+        root_manifest = (
+            "manifest:\n"
+            "  projects:\n"
+            "    - name: root\n"
+            "      url: https://github.com/example/root\n"
+        )
+        optional_manifest = (
+            "manifest:\n"
+            "  projects:\n"
+            "    - name: optional\n"
+            "      url: https://github.com/example/optional\n"
+        )
+        client = generator.ApiClient("token")
+
+        def fake_get_json(url, *, service):
+            if url == generator.DEFAULT_ZEPHYR_MANIFEST_URL:
+                return {
+                    "encoding": "base64",
+                    "content": base64.b64encode(root_manifest.encode()).decode(),
+                }
+            if url == generator.DEFAULT_ZEPHYR_SUBMANIFESTS_URL:
+                return [
+                    {
+                        "type": "file",
+                        "name": "optional.yaml",
+                        "url": "https://api.github.com/optional.yaml",
+                    },
+                    {"type": "file", "name": "README.txt"},
+                ]
+            if url == "https://api.github.com/optional.yaml":
+                return {
+                    "encoding": "base64",
+                    "content": base64.b64encode(optional_manifest.encode()).decode(),
+                }
+            raise AssertionError(f"unexpected URL: {url}")
+
+        with patch.object(client, "get_json", side_effect=fake_get_json):
+            self.assertEqual(
+                client.load_west_manifest_exclusions(
+                    generator.DEFAULT_ZEPHYR_MANIFEST_URL
+                ),
+                (
+                    {
+                        ("github.com", "example/root"),
+                        ("github.com", "example/optional"),
+                    },
+                    {"root", "optional"},
+                ),
             )
 
     def test_parse_west_manifest_repositories_supports_remote_and_url(self):

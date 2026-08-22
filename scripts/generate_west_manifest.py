@@ -25,6 +25,10 @@ DEFAULT_ZEPHYR_MANIFEST_URL = (
     "https://api.github.com/repos/zephyrproject-rtos/zephyr/contents/west.yml"
     "?ref=main"
 )
+DEFAULT_ZEPHYR_SUBMANIFESTS_URL = (
+    "https://api.github.com/repos/zephyrproject-rtos/zephyr/contents/submanifests"
+    "?ref=main"
+)
 
 
 class RemoteCheckError(RuntimeError):
@@ -144,33 +148,65 @@ class ApiClient:
         self, url: str
     ) -> tuple[set[tuple[str, str]], set[str]]:
         if url.startswith("https://api.github.com/"):
-            payload = self.get_json(url, service="github")
-            if not isinstance(payload, dict):
-                raise RemoteCheckError(
-                    f"GitHub API returned no west manifest content: {url}"
-                )
-            content = payload.get("content")
-            encoding = payload.get("encoding")
-            if not isinstance(content, str) or encoding != "base64":
-                raise RemoteCheckError(
-                    f"GitHub API returned an unsupported west manifest response: {url}"
-                )
-            try:
-                manifest = base64.b64decode(content).decode("utf-8")
-            except (ValueError, UnicodeDecodeError) as error:
-                raise RemoteCheckError(
-                    f"Could not decode the west manifest returned by {url}: {error}"
-                ) from error
+            manifests = [self._load_github_manifest_file(url)]
+            if url == DEFAULT_ZEPHYR_MANIFEST_URL:
+                manifests.extend(self._load_zephyr_submanifests())
         else:
-            manifest = self.get_text(url)
+            manifests = [self.get_text(url)]
 
-        repositories = parse_west_manifest_repositories(manifest)
-        project_names = parse_west_manifest_project_names(manifest)
+        repositories: set[tuple[str, str]] = set()
+        project_names: set[str] = set()
+        for manifest in manifests:
+            repositories.update(parse_west_manifest_repositories(manifest))
+            project_names.update(parse_west_manifest_project_names(manifest))
         if not repositories:
             raise RemoteCheckError(
                 f"No projects were found in the west manifest: {url}"
             )
         return repositories, project_names
+
+    def _load_github_manifest_file(self, url: str) -> str:
+        payload = self.get_json(url, service="github")
+        if not isinstance(payload, dict):
+            raise RemoteCheckError(
+                f"GitHub API returned no west manifest content: {url}"
+            )
+        content = payload.get("content")
+        encoding = payload.get("encoding")
+        if not isinstance(content, str) or encoding != "base64":
+            raise RemoteCheckError(
+                f"GitHub API returned an unsupported west manifest response: {url}"
+            )
+        try:
+            return base64.b64decode(content).decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as error:
+            raise RemoteCheckError(
+                f"Could not decode the west manifest returned by {url}: {error}"
+            ) from error
+
+    def _load_zephyr_submanifests(self) -> list[str]:
+        entries = self.get_json(
+            DEFAULT_ZEPHYR_SUBMANIFESTS_URL, service="github"
+        )
+        if not isinstance(entries, list):
+            raise RemoteCheckError(
+                "GitHub API returned no Zephyr submanifest directory content."
+            )
+
+        manifests: list[str] = []
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("type") != "file":
+                continue
+            name = entry.get("name")
+            content_url = entry.get("url")
+            if (
+                not isinstance(name, str)
+                or not name.endswith((".yaml", ".yml"))
+                or not isinstance(content_url, str)
+            ):
+                continue
+            manifests.append(self._load_github_manifest_file(content_url))
+        return manifests
 
     def find_module(self, repository: Repository) -> Module | None:
         if repository.host == "github.com":
